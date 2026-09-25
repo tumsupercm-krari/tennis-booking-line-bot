@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { webhookRoutes } from './webhook.route';
+import { scheduleRoutes } from './schedule.route';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -26,6 +27,7 @@ export function buildApp(): FastifyInstance {
   app.get('/health', async () => ({ status: 'ok' }));
 
   app.register(webhookRoutes);
+  app.register(scheduleRoutes);
 
   return app;
 }
