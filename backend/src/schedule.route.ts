@@ -150,7 +150,7 @@ const SCHEDULE_PAGE_HTML = `<!doctype html>
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
+    return \`\${y}-\${m}-\${day}\`;
   }
 
   function todayBangkok() {
@@ -183,7 +183,7 @@ const SCHEDULE_PAGE_HTML = `<!doctype html>
     const thead = table.querySelector('thead');
     const tbody = table.querySelector('tbody');
 
-    thead.innerHTML = '<tr><th></th>' + data.courts.map((c) => `<th>${c.courtName}</th>`).join('') + '</tr>';
+    thead.innerHTML = '<tr><th></th>' + data.courts.map((c) => \`<th>\${c.courtName}</th>\`).join('') + '</tr>';
 
     if (!data.courts.length || !data.courts[0].slots.length) {
       tbody.innerHTML = '<tr><td class="empty-state" colspan="99">ไม่มีข้อมูลคอร์ต</td></tr>';
@@ -196,9 +196,9 @@ const SCHEDULE_PAGE_HTML = `<!doctype html>
         const slot = c.slots[i];
         const cls = slot.available ? 'available' : 'booked';
         const label = slot.available ? 'ว่าง' : 'ไม่ว่าง';
-        return `<td><div class="cell ${cls}">${label}</div></td>`;
+        return \`<td><div class="cell \${cls}">\${label}</div></td>\`;
       }).join('');
-      return `<tr><th>${time}</th>${cells}</tr>`;
+      return \`<tr><th>\${time}</th>\${cells}</tr>\`;
     });
     tbody.innerHTML = rows.join('');
   }
