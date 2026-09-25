@@ -85,7 +85,7 @@ async function buildReplyForIntent(lineUserId: string, intent: BookingIntent, no
       const dateLabel = formatThaiDate(intent.date);
       const lines = openSlots
         .filter((c) => c.slots.length > 0)
-        .map((c) => `${c.court_name}: ${c.slots.join(', ')}`);
+               .map((c) => `${c.court.court_name}: ${c.slots.join(', ')}`);
       if (lines.length === 0) {
         return `วัน${dateLabel} เต็มทุกคอร์ตแล้วครับ ลองเลือกวันอื่นดูไหมครับ`;
       }
