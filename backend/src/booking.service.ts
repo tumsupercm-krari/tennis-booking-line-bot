@@ -87,6 +87,36 @@ export async function listOpenSlotsForDate(date: string): Promise<{ court: Court
   return out;
 }
 
+export interface ScheduleSlot {
+  time: string; // 'HH:00'
+  available: boolean;
+}
+
+export interface CourtSchedule {
+  court: Court;
+  slots: ScheduleSlot[];
+}
+
+/**
+ * Full hour-by-hour grid for a date, across all active courts — every slot
+ * marked available or not (unlike listOpenSlotsForDate, which only lists
+ * the open ones). Powers the public /schedule page.
+ */
+export async function getDailyScheduleGrid(date: string): Promise<CourtSchedule[]> {
+  const courts = await listActiveCourts();
+  const out: CourtSchedule[] = [];
+  for (const court of courts) {
+    const slots: ScheduleSlot[] = [];
+    for (let h = config.business.openHour; h < config.business.closeHour; h++) {
+      const time = `${String(h).padStart(2, '0')}:00`;
+      const available = await isCourtAvailable(court.court_id, date, time, 60);
+      slots.push({ time, available });
+    }
+    out.push({ court, slots });
+  }
+  return out;
+}
+
 export interface CreateBookingInput {
   courtId: number;
   lineUserId: string;
