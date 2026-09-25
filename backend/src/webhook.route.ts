@@ -162,20 +162,7 @@ export async function webhookRoutes(app: FastifyInstance) {
            const rawBody = request.rawBody;
       const signature = request.headers['x-line-signature'] as string | undefined;
 
-      // TEMPORARY diagnostics for the 401 signature mismatch — safe to log:
-      // this reveals lengths and the (one-way) computed HMAC, never the
-      // channel secret itself. Remove once verification is confirmed working.
-      request.log.info(
-        {
-          hasRawBody: !!rawBody,
-          rawBodyLength: rawBody?.length,
-          contentType: request.headers['content-type'],
-          signatureHeaderPresent: !!signature,
-          signatureHeaderLength: signature?.length,
-          secretLengthConfigured: process.env.LINE_CHANNEL_SECRET?.length,
-        },
-        'webhook signature debug',
-      );
+     
 
       if (!rawBody || !verifyLineSignature(rawBody, signature)) {
         reply.code(401).send({ error: 'invalid signature' });
