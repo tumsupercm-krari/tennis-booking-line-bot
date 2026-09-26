@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { getDailyScheduleGrid, formatThaiDate } from './booking.service';
+import { getDailyScheduleGrid, formatThaiDate, expireStalePendingBookings } from './booking.service';
 import { config } from './config';
 
 function todayInBangkok(): string {
@@ -19,8 +19,14 @@ interface ScheduleQuery {
 
 export async function scheduleRoutes(app: FastifyInstance) {
   // JSON data the page below polls. Public and read-only — it only ever
-  // returns which hourly slots are free/booked, never any customer info.
+  // returns which hourly slots are available / pending payment / booked,
+  // never any customer info.
   app.get('/api/schedule', async (request: FastifyRequest<{ Querystring: ScheduleQuery }>) => {
+    // A pending (yellow) hold that ran past its payment deadline should
+    // show green again the moment anyone looks, even if no one has
+    // messaged the bot since — so release stale holds before reading.
+    await expireStalePendingBookings();
+
     const requested = request.query.date;
     const date = requested && /^\d{4}-\d{2}-\d{2}$/.test(requested) ? requested : todayInBangkok();
     const grid = await getDailyScheduleGrid(date);
@@ -54,6 +60,7 @@ const SCHEDULE_PAGE_HTML = `<!doctype html>
   :root {
     --available-bg: #1e8e5a;
     --available-bg-hover: #197a4d;
+    --pending-bg: #b7860b;
     --booked-bg: #c0392b;
     --border: #e2e2e2;
     --text-muted: #6b7280;
@@ -92,7 +99,7 @@ const SCHEDULE_PAGE_HTML = `<!doctype html>
     font-size: 0.9rem;
   }
   .date-label { font-weight: 600; margin-left: 4px; }
-  .legend { display: flex; gap: 16px; margin-bottom: 16px; font-size: 0.85rem; color: var(--text-muted); }
+  .legend { display: flex; gap: 16px; margin-bottom: 16px; font-size: 0.85rem; color: var(--text-muted); flex-wrap: wrap; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
   .grid-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
@@ -103,6 +110,7 @@ const SCHEDULE_PAGE_HTML = `<!doctype html>
   tbody tr:not(:last-child) td, tbody tr:not(:last-child) th { border-bottom: 1px solid var(--border); }
   .cell { color: #fff; font-weight: 600; border-radius: 6px; margin: 3px; padding: 8px 4px; }
   .cell.available { background: var(--available-bg); }
+  .cell.pending { background: var(--pending-bg); }
   .cell.booked { background: var(--booked-bg); }
   .empty-state { padding: 40px 16px; text-align: center; color: var(--text-muted); }
   .updated { margin-top: 14px; font-size: 0.78rem; color: var(--text-muted); text-align: right; }
@@ -124,6 +132,7 @@ const SCHEDULE_PAGE_HTML = `<!doctype html>
 
   <div class="legend">
     <span><span class="swatch" style="background:var(--available-bg)"></span> ว่าง</span>
+    <span><span class="swatch" style="background:var(--pending-bg)"></span> รอชำระเงิน</span>
     <span><span class="swatch" style="background:var(--booked-bg)"></span> ไม่ว่าง</span>
   </div>
 
@@ -179,6 +188,12 @@ const SCHEDULE_PAGE_HTML = `<!doctype html>
     }
   }
 
+  function statusMeta(status) {
+    if (status === 'booked') return { cls: 'booked', label: 'ไม่ว่าง' };
+    if (status === 'pending') return { cls: 'pending', label: 'รอชำระ' };
+    return { cls: 'available', label: 'ว่าง' };
+  }
+
   function renderTable(data) {
     const thead = table.querySelector('thead');
     const tbody = table.querySelector('tbody');
@@ -194,9 +209,8 @@ const SCHEDULE_PAGE_HTML = `<!doctype html>
       const time = data.courts[0].slots[i].time;
       const cells = data.courts.map((c) => {
         const slot = c.slots[i];
-        const cls = slot.available ? 'available' : 'booked';
-        const label = slot.available ? 'ว่าง' : 'ไม่ว่าง';
-        return \`<td><div class="cell \${cls}">\${label}</div></td>\`;
+        const meta = statusMeta(slot.status);
+        return \`<td><div class="cell \${meta.cls}">\${meta.label}</div></td>\`;
       }).join('');
       return \`<tr><th>\${time}</th>\${cells}</tr>\`;
     });
