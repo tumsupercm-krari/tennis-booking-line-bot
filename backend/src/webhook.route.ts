@@ -1,13 +1,19 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { verifyLineSignature, replyMessage, getUserProfile } from './line.service';
-import { extractBookingIntent, type BookingIntent } from './claude.service';
+import { verifyLineSignature, replyMessage, getUserProfile, getMessageContent } from './line.service';
+import { extractBookingIntent, readPaymentSlip, type BookingIntent } from './claude.service';
 import {
   findAvailableCourts,
-  createBooking,
+  createPendingBooking,
   isWithinBusinessHours,
+  isWithinLeadTime,
   listOpenSlotsForDate,
   findUpcomingBookingForUser,
+  findPendingBookingForUser,
+  confirmBookingPayment,
   cancelBooking,
+  expireStalePendingBookings,
+  expectedAmount,
+  formatBaht,
   formatThaiDate,
 } from './booking.service';
 import { db } from './db';
@@ -17,7 +23,7 @@ interface LineWebhookEvent {
   type: string;
   replyToken?: string;
   source: { type: string; userId?: string };
-  message?: { type: string; text?: string };
+  message?: { type: string; text?: string; id?: string };
 }
 
 interface LineWebhookBody {
@@ -54,14 +60,62 @@ async function logMessage(lineUserId: string, direction: 'in' | 'out', text: str
     .execute();
 }
 
-async function handleTextMessage(lineUserId: string, replyToken: string, text: string): Promise<void> {
+async function handleTextMessage(lineUserId: string, replyToken: string, text: string, nowBangkok: string): Promise<void> {
   await logMessage(lineUserId, 'in', text);
 
-  const nowBangkok = nowInBangkokSql();
   const intent: BookingIntent = await extractBookingIntent(text, nowBangkok);
   await logMessage(lineUserId, 'in', `[parsed] ${text}`, intent);
 
   const reply = await buildReplyForIntent(lineUserId, intent, nowBangkok);
+  await logMessage(lineUserId, 'out', reply);
+  await replyMessage(replyToken, [{ type: 'text', text: reply }]);
+}
+
+/**
+ * Handles a photo sent in the chat — the demo's way of "checking" payment:
+ * Claude's vision looks at the image and reports (a) whether it looks like
+ * a transfer slip at all and (b) whether its printed date/time is recent.
+ * Confirmation only gates on those two — the amount is not checked. This
+ * is a best-effort read, NOT real bank verification (a slip image can in
+ * principle be edited before sending); fine for a low-stakes portfolio
+ * demo, not for a business handling real money.
+ */
+async function handleImageMessage(
+  lineUserId: string,
+  replyToken: string,
+  messageId: string | undefined,
+  nowBangkok: string,
+): Promise<void> {
+  await logMessage(lineUserId, 'in', '[รูปภาพ]');
+
+  if (!messageId) return;
+
+  const pending = await findPendingBookingForUser(lineUserId);
+  if (!pending) {
+    const reply = 'ไม่พบรายการที่รอชำระเงินของคุณครับ ถ้าต้องการจอง พิมพ์บอกวัน-เวลาที่ต้องการได้เลยครับ';
+    await logMessage(lineUserId, 'out', reply);
+    await replyMessage(replyToken, [{ type: 'text', text: reply }]);
+    return;
+  }
+
+  const { buffer, contentType } = await getMessageContent(messageId);
+  const reading = await readPaymentSlip(buffer.toString('base64'), contentType, nowBangkok);
+  await logMessage(lineUserId, 'in', '[parsed-slip]', reading);
+
+  let reply: string;
+  if (reading.looks_like_transfer_slip && reading.transfer_looks_recent) {
+    await confirmBookingPayment(pending.booking_id, reading.amount_thb, reading.transferred_at_text);
+    reply =
+      `ยืนยันการชำระเงินเรียบร้อยครับ ✅\n` +
+      `${pending.court_name} วัน${formatThaiDate(String(pending.booking_date))} เวลา ${pending.start_time} น.\n` +
+      `รหัสการจอง #${pending.booking_id}\n\n` +
+      `(ตรวจสอบจากรูปสลิปที่ส่งมาด้วย AI แบบคร่าวๆ ยังไม่ใช่การตรวจสอบกับธนาคารจริง)`;
+  } else if (reading.looks_like_transfer_slip) {
+    reply = 'เห็นสลิปแล้วครับ แต่เวลาที่โอนดูไม่ใช่ช่วงนี้ รบกวนส่งสลิปล่าสุดของการโอนครั้งนี้อีกครั้งครับ';
+  } else {
+    reply = 'ขอโทษครับ ดูไม่เหมือนสลิปโอนเงินที่ชัดเจน รบกวนถ่าย/แคปหน้าจอสลิปแล้วส่งมาใหม่อีกครั้งครับ';
+  }
+
   await logMessage(lineUserId, 'out', reply);
   await replyMessage(replyToken, [{ type: 'text', text: reply }]);
 }
@@ -85,7 +139,7 @@ async function buildReplyForIntent(lineUserId: string, intent: BookingIntent, no
       const dateLabel = formatThaiDate(intent.date);
       const lines = openSlots
         .filter((c) => c.slots.length > 0)
-               .map((c) => `${c.court.court_name}: ${c.slots.join(', ')}`);
+        .map((c) => `${c.court.court_name}: ${c.slots.join(', ')}`);
       if (lines.length === 0) {
         return `วัน${dateLabel} เต็มทุกคอร์ตแล้วครับ ลองเลือกวันอื่นดูไหมครับ`;
       }
@@ -100,10 +154,13 @@ async function buildReplyForIntent(lineUserId: string, intent: BookingIntent, no
       if (!isWithinBusinessHours(intent.start_time, duration)) {
         return `ขอโทษครับ เปิดให้บริการเวลา ${String(config.business.openHour).padStart(2, '0')}:00–${String(config.business.closeHour).padStart(2, '0')}:00 รบกวนเลือกเวลาในช่วงนี้ครับ`;
       }
+      if (!isWithinLeadTime(intent.date, intent.start_time, nowBangkokSql)) {
+        return `ต้องจองล่วงหน้าอย่างน้อย ${config.booking.leadHours} ชั่วโมงก่อนถึงเวลาเล่นครับ รบกวนเลือกเวลาอื่นครับ`;
+      }
 
       const available = await findAvailableCourts(intent.date, intent.start_time, duration);
       if (available.length === 0) {
-        return `ขอโทษครับ วัน${formatThaiDate(intent.date)} เวลา ${intent.start_time} เต็มทุกคอร์ตแล้ว ลองเวลาอื่นดูไหมครับ`;
+        return `ขอโทษครับ วัน${formatThaiDate(intent.date)} เวลา ${intent.start_time} เต็มทุกคอร์ตแล้ว (หรือมีคนกำลังชำระเงินอยู่) ลองเวลาอื่นดูไหมครับ`;
       }
 
       const preferred =
@@ -117,7 +174,7 @@ async function buildReplyForIntent(lineUserId: string, intent: BookingIntent, no
 
       const chosenCourt = preferred ?? available[0];
       const profile = await getUserProfile(lineUserId);
-      const booking = await createBooking({
+      const booking = await createPendingBooking({
         courtId: chosenCourt.court_id,
         lineUserId,
         customerName: profile?.displayName ?? null,
@@ -126,20 +183,25 @@ async function buildReplyForIntent(lineUserId: string, intent: BookingIntent, no
         durationMinutes: duration,
       });
 
+      const amount = expectedAmount(chosenCourt.hourly_rate, duration);
       const durationLabel = duration === 60 ? '1 ชั่วโมง' : `${duration} นาที`;
       return (
-        `จองสำเร็จครับ ✅\n` +
+        `จองคิวไว้ให้แล้วครับ ⏳ (รอชำระเงิน)\n` +
         `${chosenCourt.court_name}\n` +
         `วัน${formatThaiDate(intent.date)} เวลา ${intent.start_time} น. (${durationLabel})\n` +
-        `รหัสการจอง #${booking.booking_id}\n\n` +
-        `พิมพ์ "ยกเลิกการจอง" ได้ถ้าต้องการยกเลิกครับ`
+        `รหัสการจอง #${booking.booking_id}\n` +
+        `ยอดชำระ ${formatBaht(amount)} บาท\n\n` +
+        `โอนไปที่:\n${config.payment.bankName} ${config.payment.accountNumber}\n` +
+        `ชื่อบัญชี ${config.payment.accountName}\n\n` +
+        `แล้วส่ง "รูปสลิป" กลับมาในแชทนี้ภายใน ${config.payment.holdMinutes} นาทีนะครับ ระบบจะตรวจสลิปให้อัตโนมัติ\n` +
+        `ถ้าไม่โอนภายในเวลา คิวนี้จะถูกปล่อยให้คนอื่นจองแทนอัตโนมัติครับ`
       );
     }
 
     case 'cancel': {
       const upcoming = await findUpcomingBookingForUser(lineUserId, nowBangkokSql);
       if (!upcoming) {
-        return 'ไม่พบรายการจองที่กำลังจะถึงของคุณครับ';
+        return 'ไม่พบรายการจอง (หรือรายการที่รอชำระเงิน) ของคุณครับ';
       }
       await cancelBooking(upcoming.booking_id);
       return (
@@ -159,10 +221,8 @@ export async function webhookRoutes(app: FastifyInstance) {
   // signature is computed over those exact raw bytes, so verification
   // below reads that instead of re-serializing request.body.
   app.post('/webhook', async (request: FastifyRequest, reply: FastifyReply) => {
-           const rawBody = request.rawBody;
+      const rawBody = request.rawBody;
       const signature = request.headers['x-line-signature'] as string | undefined;
-
-     
 
       if (!rawBody || !verifyLineSignature(rawBody, signature)) {
         reply.code(401).send({ error: 'invalid signature' });
@@ -175,14 +235,24 @@ export async function webhookRoutes(app: FastifyInstance) {
       // Claude call + DB work. Acknowledge immediately, then process.
       reply.code(200).send({ status: 'ok' });
 
+      // Lazily release any payment hold that has run past its deadline,
+      // before anything below reads or changes booking state.
+      await expireStalePendingBookings();
+
+      const nowBangkok = nowInBangkokSql();
+
       for (const event of body.events) {
-        if (event.type !== 'message' || event.message?.type !== 'text') continue;
+        if (event.type !== 'message') continue;
         const lineUserId = event.source.userId;
         const replyToken = event.replyToken;
         if (!lineUserId || !replyToken) continue;
 
         try {
-          await handleTextMessage(lineUserId, replyToken, event.message.text ?? '');
+          if (event.message?.type === 'text') {
+            await handleTextMessage(lineUserId, replyToken, event.message.text ?? '', nowBangkok);
+          } else if (event.message?.type === 'image') {
+            await handleImageMessage(lineUserId, replyToken, event.message.id, nowBangkok);
+          }
         } catch (err) {
           request.log.error(err, 'Failed to handle LINE message');
         }
