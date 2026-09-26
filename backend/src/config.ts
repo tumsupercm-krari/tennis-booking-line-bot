@@ -32,4 +32,21 @@ export const config = {
     closeHour: 22, // 22:00 (last bookable end time)
     timeZone: 'Asia/Bangkok',
   },
+
+  // Where customers transfer money to, shown in the booking confirmation
+  // message. Required so the service fails fast at boot if these were
+  // never set, rather than sending a broken "โอนไปที่: undefined" message.
+  payment: {
+    bankName: required('PAYMENT_BANK_NAME'),
+    accountName: required('PAYMENT_ACCOUNT_NAME'),
+    accountNumber: required('PAYMENT_ACCOUNT_NUMBER'),
+    // How long an unpaid booking holds the slot before it's released back
+    // to available automatically.
+    holdMinutes: Number(process.env.PAYMENT_HOLD_MINUTES ?? 15),
+  },
+
+  booking: {
+    // Minimum lead time before the requested start time.
+    leadHours: Number(process.env.BOOKING_LEAD_HOURS ?? 2),
+  },
 };
