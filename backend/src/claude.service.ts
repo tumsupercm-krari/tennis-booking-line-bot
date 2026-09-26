@@ -88,3 +88,105 @@ export async function extractBookingIntent(userMessage: string, nowBangkok: stri
   }
   return toolUse.input as BookingIntent;
 }
+
+export interface SlipReading {
+  looks_like_transfer_slip: boolean;
+  transfer_looks_recent: boolean;
+  amount_thb: number | null;
+  bank_name: string | null;
+  transferred_at_text: string | null;
+}
+
+const SLIP_TOOL: Anthropic.Tool = {
+  name: 'read_payment_slip',
+  description: 'Extract what a Thai bank-transfer slip image shows, without judging whether the transfer is genuine.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      looks_like_transfer_slip: {
+        type: 'boolean',
+        description: 'True if the image resembles a bank/mobile-banking transfer confirmation screen or printed slip at all.',
+      },
+      transfer_looks_recent: {
+        type: 'boolean',
+        description:
+          'True only if the date/time printed on the slip falls within the recent window stated in the prompt (allowing a little clock skew). ' +
+          'False if the slip is clearly older than that window, dated in the future, or has no readable date/time at all.',
+      },
+      amount_thb: {
+        type: ['number', 'null'],
+        description: 'The transferred amount in Thai Baht as printed on the slip (e.g. 400 or 400.00). Null if unreadable or not a slip.',
+      },
+      bank_name: {
+        type: ['string', 'null'],
+        description: 'Bank or app name shown on the slip (e.g. "กสิกรไทย", "SCB", "PromptPay"). Null if not visible.',
+      },
+      transferred_at_text: {
+        type: ['string', 'null'],
+        description: 'The date/time text printed on the slip, exactly as shown. Null if not visible.',
+      },
+    },
+    required: ['looks_like_transfer_slip', 'transfer_looks_recent', 'amount_thb', 'bank_name', 'transferred_at_text'],
+  },
+};
+
+const SLIP_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const;
+type SlipMediaType = (typeof SLIP_MEDIA_TYPES)[number];
+
+/**
+ * Reads a payment-slip image with Claude's vision and reports what it shows.
+ *
+ * IMPORTANT: this is a best-effort OCR read, NOT real payment verification.
+ * It only reports what pixels are on the image, which a customer could in
+ * principle edit before sending — there is no check against the bank's
+ * actual records. This demo only gates on (a) it looking like a transfer
+ * slip at all and (b) its printed date/time being recent — it does not
+ * check the amount. Good enough for a low-stakes demo; a real business
+ * handling real money should verify against an actual bank / slip
+ * -verification API instead.
+ *
+ * `nowBangkok` is 'YYYY-MM-DD HH:MM:SS' Asia/Bangkok wall-clock time, used
+ * so Claude can judge whether the slip's printed timestamp is recent.
+ */
+export async function readPaymentSlip(imageBase64: string, contentType: string, nowBangkok: string): Promise<SlipReading> {
+  const mediaType: SlipMediaType = (SLIP_MEDIA_TYPES as readonly string[]).includes(contentType)
+    ? (contentType as SlipMediaType)
+    : 'image/jpeg';
+
+  // A little slack beyond the payment hold window, for clock skew between
+  // the customer's phone/bank app and this server.
+  const recentWindowMinutes = config.payment.holdMinutes + 10;
+
+  const response = await anthropic.messages.create({
+    model: config.anthropic.model,
+    max_tokens: 512,
+    system:
+      'You read Thai bank transfer slip images (screenshots or photos) and report exactly what they show. ' +
+      `The current date/time in Asia/Bangkok (UTC+7) is ${nowBangkok}. Set transfer_looks_recent to true only if the ` +
+      `slip's printed date/time is within about ${recentWindowMinutes} minutes before that current time. ` +
+      'Call read_payment_slip exactly once. Do not guess values that are not visibly printed on the image.',
+    tools: [SLIP_TOOL],
+    tool_choice: { type: 'tool', name: 'read_payment_slip' },
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: imageBase64 } },
+          { type: 'text', text: 'อ่านสลิปโอนเงินนี้ครับ' },
+        ],
+      },
+    ],
+  });
+
+  const toolUse = response.content.find((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');
+  if (!toolUse) {
+    return {
+      looks_like_transfer_slip: false,
+      transfer_looks_recent: false,
+      amount_thb: null,
+      bank_name: null,
+      transferred_at_text: null,
+    };
+  }
+  return toolUse.input as SlipReading;
+}
