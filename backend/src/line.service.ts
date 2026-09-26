@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import { config } from './config';
 
 const LINE_API_BASE = 'https://api.line.me/v2/bot';
+// Message content (images/video/audio) is served from a separate host.
+const LINE_DATA_API_BASE = 'https://api-data.line.me/v2/bot';
 
 /**
  * Verify that a webhook request really came from LINE.
@@ -65,4 +67,17 @@ export async function getUserProfile(lineUserId: string): Promise<LineProfile | 
   });
   if (!res.ok) return null;
   return (await res.json()) as LineProfile;
+}
+
+/** Download the binary content of an image (or video/audio) message the user sent — used to read payment slips. */
+export async function getMessageContent(messageId: string): Promise<{ buffer: Buffer; contentType: string }> {
+  const res = await fetch(`${LINE_DATA_API_BASE}/message/${messageId}/content`, {
+    headers: { Authorization: `Bearer ${config.line.channelAccessToken}` },
+  });
+  if (!res.ok) {
+    throw new Error(`LINE content API failed: ${res.status}`);
+  }
+  const contentType = res.headers.get('content-type') ?? 'image/jpeg';
+  const buffer = Buffer.from(await res.arrayBuffer());
+  return { buffer, contentType };
 }
